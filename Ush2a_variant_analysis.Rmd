@@ -1,0 +1,128 @@
+---
+title: "Ush2a_variant_analysis"
+author: "Darwin"
+date: "June 10, 2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Variant analysis of Ush2a allele frequency tables
+
+Filter and merge forward and reverse reads using DADA2:
+
+Callahan BJ, McMurdie PJ, Rosen MJ, Han AW, Johnson AJA, Holmes SP (2016). “DADA2: High-resolution sample inference from Illumina
+amplicon data.” _Nature Methods_, *13*, 581-583. doi: 10.1038/nmeth.3869 (URL: https://doi.org/10.1038/nmeth.3869).
+
+
+```{r dada2}
+
+library(dada2)
+
+files <- paste("./00-fastq/",unlist(read.table("Ush2a_files.csv"), use.names = FALSE), sep = "")
+
+# Separate files into forward and reverse reads
+fnFs <- sort(grep(files,pattern = "_R1_",value = TRUE))
+fnRs <- sort(grep(files,pattern = "_R2_",value = TRUE))
+
+# Extract sample names
+sample.names <- sapply(strsplit(basename(fnFs), "_"), `[`, 1)
+
+# Create directory for filtered fastq file
+filtFs <- file.path("./01_filtered", paste0(sample.names, "_F_filt.fastq.gz"))
+filtRs <- file.path("./01_filtered", paste0(sample.names, "_R_filt.fastq.gz"))
+names(filtFs) <- sample.names
+names(filtRs) <- sample.names
+
+# Filter and trim reads by quality score
+out <- filterAndTrim(fnFs, filtFs, fnRs, filtRs, truncLen=c(240,220),
+              maxN=0, maxEE=c(2,5), truncQ=2, rm.phix=TRUE,
+              compress=TRUE, multithread=FALSE) # On Windows set multithread=FALSE
+head(out)
+
+# Learn error rates using DADA2 error model
+errF <- learnErrors(filtFs, multithread=FALSE)
+errR <- learnErrors(filtRs, multithread=FALSE)
+
+# Plot error rates for forward reads
+plotErrors(errF, nominalQ=TRUE)
+
+# Filter reads for sequencing error using DADA2 sample inference algorithm
+dadaFs <- dada(filtFs, err=errF, multithread=FALSE)
+dadaRs <- dada(filtRs, err=errR, multithread=FALSE)
+
+# Merge filtered forward and reverse reads
+mergers <- mergePairs(dadaFs, filtFs, dadaRs, filtRs, verbose=TRUE)
+
+# Calculate frequency for each sequence within a sequencing library
+for (i in 1:length(mergers)) {
+  mergers[[i]]$rate  <- mergers[[i]]$abundance/sum(mergers[[i]]$abundance)
+}
+
+head(mergers[[1]],10)
+
+
+
+```
+
+
+## Calculate editing efficiency from allele frequency tables
+
+Identify edited alleles as sequences which contain the desired point mutation and no undesired mutations. All combinations of additional silent mutations encoded by Rewriter (i.e. PAM disabling, polyA tract disrupting, etc.) are acceptable. Editing effiency is given by the frequency of these sequences in each sequencing library.
+
+
+```{r analysis}
+
+library(combinat)
+library(gtools)
+
+# Initialize results data frame
+results <- data.frame(row.names = sample.names, stringsAsFactors = FALSE)
+
+# Reference Ush2a amplicon sequence with target surrogate mutation identified using lowercase letter
+ref <- "GTTCGTATCATCTGCAGTAGCATTGTTTGTGTCTCGTCTATCTTGAATGAAATCATTTTCCCATCCTCACCTTTTAAATATATTTTATCTTTAGGGCTTAGGTGTGATCATTGCAATTTTGGATTTAAATTTCTCCGAAGCTTTAATGATGTTGGATGTGAGCCCTGCCAGTGTAACCTCCATGGCTCAGTGAACAAATTCTGCAATCCTCACTCTGGGCAGTGcGAGTGCAAAAAAGAAGCCAAAGGACTTCAGTGTGACACCTGCAGAGAAAACTTTTATGGGTTAGATGTCACCAATTGTAAGGCCTGTGACTGTGACACAGCTGGATCCCTCCCTGGGACTGTCTGTAATGCTAAGACAGGGCAGTGCATCTGCAAGCCCAATGTTGAAGGGAGACAGTGCAATAAATGTTTGGAGGGAAACTTCTACCTACGGCA"
+
+# Data frame with nucleotide position and desired base of each additional Rewriter point mutation
+mut <- data.frame(loc = 243, pm = "A")
+
+# Generate combinatorial matrix for potential groupings of additional mutations
+ind <- expand.grid(0:1)
+
+# Use matrix ind to generate all allowable sequences for quantification of editing percent
+ref1 <- array()
+ref1[1:dim(ind)[1]] <- toupper(c(ref))
+
+for (i in 2:length(ref1)) {
+  temp1 <- mut$loc[as.numeric(ind[i,])]
+  temp2 <- mut$pm[as.numeric(ind[i,])]
+  
+  for (j in 1:length(temp1)) {
+    substr(ref1[i],temp1[j],temp1[j]) <- temp2[j]
+  }
+}
+  
+
+# Calculate total reads and total edited reads per library
+for (i in 1:length(sample.names)) {
+  temp <- mergers[[i]]
+
+  results$totalReads[i] <- sum(temp$abundance)
+  
+  for (j in 1:length(ref1)) {
+      if (any(temp$sequence == ref1[j])) {
+        results[i,j+1] <- temp$abundance[temp$sequence == ref1[j]]
+      } else {
+        results[i,j+1] <- 0
+      }
+  }
+  
+  # Compute editing efficiency for each NGS library
+  results$editing[i] <- sum(results[i,2:3])/results$totalReads[i]
+}
+
+
+write.csv(results,"Ush2a_editing_efficiency.csv")
+
+```
